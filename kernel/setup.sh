@@ -15,18 +15,11 @@ else
 	exit 127
 fi
 
-test -d "$GKI_ROOT/Kernel_driver_hack" || git clone https://github.com/Jiang-Night/Kernel_driver_hack
+test -d "$GKI_ROOT/Kernel_driver_hack" || git clone https://github.com/pfgq/Kernel_driver_hack
 cd "$GKI_ROOT/Kernel_driver_hack"
 git stash
-if [ "$(git status | grep -Po 'v\d+(\.\d+)*' | head -n1)" ]; then
-	git checkout main
-fi
+git checkout main
 git pull
-if [ -z "${1-}" ]; then
-    git checkout "$(git describe --abbrev=0 --tags)"
-else
-    git checkout "$1"
-fi
 cd "$GKI_ROOT"
 
 echo "[+] GKI_ROOT: $GKI_ROOT"
