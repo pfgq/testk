@@ -15,7 +15,7 @@ else
 	exit 127
 fi
 
-test -d "$GKI_ROOT/Kernel_driver_hack" || git clone https://github.com/pfgq/testk
+test -d "$GKI_ROOT/Kernel_driver_hack" || git clone https://github.com/pfgq/Kernel_driver_hack
 cd "$GKI_ROOT/Kernel_driver_hack"
 git stash
 git checkout main
