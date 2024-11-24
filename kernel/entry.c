@@ -1,112 +1,208 @@
-#include <linux/module.h>
-#include <linux/tty.h>
-#include <linux/miscdevice.h>
-#include "comm.h"
 #include "memory.h"
-#include "process.h"
+#include <linux/tty.h>
+#include <linux/io.h>
+#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/version.h>
 
-#define DEVICE_NAME "JiangNight"
+#include <asm/cpu.h>
+#include <asm/io.h>
+#include <asm/page.h>
+#include <asm/pgtable.h>
 
-int dispatch_open(struct inode *node, struct file *file)
+extern struct mm_struct *get_task_mm(struct task_struct *task);
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 61))
+extern void mmput(struct mm_struct *);
+
+phys_addr_t translate_linear_address(struct mm_struct *mm, uintptr_t va)
 {
-	return 0;
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pmd_t *pmd;
+    pte_t *pte;
+    pud_t *pud;
+
+    phys_addr_t page_addr;
+    uintptr_t page_offset;
+
+    pgd = pgd_offset(mm, va);
+    if (pgd_none(*pgd) || pgd_bad(*pgd)) {
+        return 0;
+    }
+    p4d = p4d_offset(pgd, va);
+    if (p4d_none(*p4d) || p4d_bad(*p4d)) {
+        return 0;
+    }
+    pud = pud_offset(p4d, va);
+    if (pud_none(*pud) || pud_bad(*pud)) {
+        return 0;
+    }
+    pmd = pmd_offset(pud, va);
+    if (pmd_none(*pmd)) {
+        return 0;
+    }
+    pte = pte_offset_kernel(pmd, va);
+    if (pte_none(*pte)) {
+        return 0;
+    }
+    if (!pte_present(*pte)) {
+        return 0;
+    }
+    // 页物理地址
+    page_addr = (phys_addr_t)(pte_pfn(*pte) << PAGE_SHIFT);
+    // 页内偏移
+    page_offset = va & (PAGE_SIZE - 1);
+
+    return page_addr + page_offset;
+}
+#else
+phys_addr_t translate_linear_address(struct mm_struct *mm, uintptr_t va)
+{
+    pgd_t *pgd;
+    pmd_t *pmd;
+    pte_t *pte;
+    pud_t *pud;
+
+    phys_addr_t page_addr;
+    uintptr_t page_offset;
+
+    pgd = pgd_offset(mm, va);
+    if (pgd_none(*pgd) || pgd_bad(*pgd)) {
+        return 0;
+    }
+    pud = pud_offset(pgd, va);
+    if (pud_none(*pud) || pud_bad(*pud)) {
+        return 0;
+    }
+    pmd = pmd_offset(pud, va);
+    if (pmd_none(*pmd)) {
+        return 0;
+    }
+    pte = pte_offset_kernel(pmd, va);
+    if (pte_none(*pte)) {
+        return 0;
+    }
+    if (!pte_present(*pte)) {
+        return 0;
+    }
+    // 页物理地址
+    page_addr = (phys_addr_t)(pte_pfn(*pte) << PAGE_SHIFT);
+    // 页内偏移
+    page_offset = va & (PAGE_SIZE - 1);
+
+    return page_addr + page_offset;
+}
+#endif
+
+#ifndef ARCH_HAS_VALID_PHYS_ADDR_RANGE
+static inline int valid_phys_addr_range(phys_addr_t addr, size_t count)
+{
+    return addr + count <= __pa(high_memory);
+}
+#endif
+
+bool read_physical_address(phys_addr_t pa, void *buffer, size_t size)
+{
+    void *mapped;
+
+    if (!pfn_valid(__phys_to_pfn(pa))) {
+        return false;
+    }
+    if (!valid_phys_addr_range(pa, size)) {
+        return false;
+    }
+    mapped = ioremap_cache(pa, size);
+    if (!mapped) {
+        return false;
+    }
+    if (copy_to_user(buffer, mapped, size)) {
+        iounmap(mapped);
+        return false;
+    }
+    iounmap(mapped);
+    return true;
 }
 
-int dispatch_close(struct inode *node, struct file *file)
+bool write_physical_address(phys_addr_t pa, void *buffer, size_t size)
 {
-	return 0;
+    void *mapped;
+
+    if (!pfn_valid(__phys_to_pfn(pa))) {
+        return false;
+    }
+    if (!valid_phys_addr_range(pa, size)) {
+        return false;
+    }
+    mapped = ioremap_cache(pa, size);
+    if (!mapped) {
+        return false;
+    }
+    if (copy_from_user(mapped, buffer, size)) {
+        iounmap(mapped);
+        return false;
+    }
+    iounmap(mapped);
+    return true;
 }
 
-long dispatch_ioctl(struct file *const file, unsigned int const cmd, unsigned long const arg)
+bool read_process_memory(pid_t pid, uintptr_t addr, void *buffer, size_t size)
 {
-	static COPY_MEMORY cm;
-	static MODULE_BASE mb;
-	static char key[0x100] = {0};
-	static char name[0x100] = {0};
-	static bool is_verified = false;
+    struct task_struct *task;
+    struct mm_struct *mm;
+    struct pid *pid_struct;
+    phys_addr_t pa;
 
-	if (cmd == OP_INIT_KEY && !is_verified)
-	{
-		if (copy_from_user(key, (void __user *)arg, sizeof(key) - 1) != 0)
-		{
-			return -1;
-		}
-	}
-	switch (cmd)
-	{
-	case OP_READ_MEM:
-	{
-		if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)) != 0)
-		{
-			return -1;
-		}
-		if (read_process_memory(cm.pid, cm.addr, cm.buffer, cm.size) == false)
-		{
-			return -1;
-		}
-		break;
-	}
-	case OP_WRITE_MEM:
-	{
-		if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)) != 0)
-		{
-			return -1;
-		}
-		if (write_process_memory(cm.pid, cm.addr, cm.buffer, cm.size) == false)
-		{
-			return -1;
-		}
-		break;
-	}
-	case OP_MODULE_BASE:
-	{
-		if (copy_from_user(&mb, (void __user *)arg, sizeof(mb)) != 0 || copy_from_user(name, (void __user *)mb.name, sizeof(name) - 1) != 0)
-		{
-			return -1;
-		}
-		mb.base = get_module_base(mb.pid, name);
-		if (copy_to_user((void __user *)arg, &mb, sizeof(mb)) != 0)
-		{
-			return -1;
-		}
-		break;
-	}
-	default:
-		break;
-	}
-	return 0;
+    pid_struct = find_get_pid(pid);
+    if (!pid_struct) {
+        return false;
+    }
+    task = get_pid_task(pid_struct, PIDTYPE_PID);
+    if (!task) {
+        return false;
+    }
+    mm = get_task_mm(task);
+    if (!mm) {
+        return false;
+    }
+
+    // 使用 exit_mmap(mm) 代替 mmput(mm)
+    exit_mmap(mm); // 清理内存映射
+
+    pa = translate_linear_address(mm, addr);
+    if (!pa) {
+        return false;
+    }
+    return read_physical_address(pa, buffer, size);
 }
 
-struct file_operations dispatch_functions = {
-	.owner = THIS_MODULE,
-	.open = dispatch_open,
-	.release = dispatch_close,
-	.unlocked_ioctl = dispatch_ioctl,
-};
-
-struct miscdevice misc = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = DEVICE_NAME,
-	.fops = &dispatch_functions,
-};
-
-int __init driver_entry(void)
+bool write_process_memory(pid_t pid, uintptr_t addr, void *buffer, size_t size)
 {
-	int ret;
-	printk("[+] driver_entry");
-	ret = misc_register(&misc);
-	return ret;
+    struct task_struct *task;
+    struct mm_struct *mm;
+    struct pid *pid_struct;
+    phys_addr_t pa;
+
+    pid_struct = find_get_pid(pid);
+    if (!pid_struct) {
+        return false;
+    }
+    task = get_pid_task(pid_struct, PIDTYPE_PID);
+    if (!task) {
+        return false;
+    }
+    mm = get_task_mm(task);
+    if (!mm) {
+        return false;
+    }
+
+    // 使用 exit_mmap(mm) 代替 mmput(mm)
+    exit_mmap(mm); // 清理内存映射
+
+    pa = translate_linear_address(mm, addr);
+    if (!pa) {
+        return false;
+    }
+    return write_physical_address(pa, buffer, size);
 }
-
-void __exit driver_unload(void)
-{
-	printk("[+] driver_unload");
-	misc_deregister(&misc);
-}
-
-module_init(driver_entry);
-module_exit(driver_unload);
-
-MODULE_DESCRIPTION("Linux Kernel.");
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("JiangNight");

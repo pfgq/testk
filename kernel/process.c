@@ -4,8 +4,6 @@
 #include <linux/tty.h>
 #include <linux/mm.h>
 #include <linux/version.h>
-#include <linux/types.h>  
-#include <linux/uidgid.h> 
 
 #define ARC_PATH_MAX 256
 
@@ -25,22 +23,31 @@ uintptr_t get_module_base(pid_t pid, char *name)
     struct vma_iterator vmi;
 #endif
 
+    // 获取进程的 pid_struct
     pid_struct = find_get_pid(pid);
     if (!pid_struct)
     {
-        return 0; 
+        return 0;  // 返回 0，表示找不到进程
     }
+
+    // 获取任务结构体 task
     task = get_pid_task(pid_struct, PIDTYPE_PID);
     if (!task)
     {
-        return 0;
+        return 0;  // 返回 0，表示获取 task 失败
     }
+
+    // 获取任务的 mm_struct
     mm = get_task_mm(task);
     if (!mm)
     {
-        return 0;
+        return 0;  // 返回 0，表示获取 mm_struct 失败
     }
 
+    // 清理 mm_struct
+    mmput(mm);
+
+    // 遍历进程的虚拟内存区域
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
     vma_iter_init(&vmi, mm, 0);
     for_each_vma(vmi, vma)
@@ -51,15 +58,19 @@ uintptr_t get_module_base(pid_t pid, char *name)
         char buf[ARC_PATH_MAX];
         char *path_nm = "";
 
+        // 检查 VMA 是否映射文件
         if (vma->vm_file)
         {
-            path_nm =
-                file_path(vma->vm_file, buf, ARC_PATH_MAX - 1);
+            // 获取文件路径
+            path_nm = file_path(vma->vm_file, buf, ARC_PATH_MAX - 1);
+            // 如果文件名与目标模块名匹配，返回该 VMA 的起始地址
             if (!strcmp(kbasename(path_nm), name))
             {
                 return vma->vm_start;
             }
         }
     }
+    
+    // 如果没有找到匹配的模块，返回 0
     return 0;
 }
